@@ -1,0 +1,12 @@
+{
+  "name": "kempenfelt-service-issue-api",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0"
+  }
+}
