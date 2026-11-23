@@ -31,8 +31,10 @@ function doPost(e) {
         // Columns A-N: timestamp and 13 report fields.
         // Columns O-R: existing manager-managed fields, untouched.
         // Column S: unique report ID.
-        const row = [new Date()].concat(values).concat(["","","","",id]);
-        sheet.appendRow(row);
+        const row = nextReportRow_(sheet);
+        if (row > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 1);
+        sheet.getRange(row, 1, 1, values.length + 1).setValues([[new Date()].concat(values)]);
+        sheet.getRange(row, CONFIG.ID_COLUMN).setValue(id);
         SpreadsheetApp.flush();
       }
     } finally { lock.releaseLock(); }
@@ -58,6 +60,15 @@ function doGet(e) {
   }
   return ContentService.createTextOutput(callback + "(" + JSON.stringify({saved:saved}) + ");")
     .setMimeType(ContentService.MimeType.JAVASCRIPT);
+}
+function nextReportRow_(sheet) {
+  const last = sheet.getLastRow();
+  if (last < 2) return 2;
+  const rows = sheet.getRange(2, 1, last - 1, CONFIG.ID_COLUMN).getValues();
+  const emptyIndex = rows.findIndex(row =>
+    row[CONFIG.ID_COLUMN - 1] === "" && row.slice(0, FIELDS.length + 1).every(value => value === "")
+  );
+  return emptyIndex === -1 ? last + 1 : emptyIndex + 2;
 }
 function findReport_(sheet,id) {
   const last = sheet.getLastRow();
