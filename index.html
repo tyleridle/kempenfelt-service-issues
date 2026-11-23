@@ -460,7 +460,7 @@
 
     <script>
       (function () {
-        var FORM_RESPONSE_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfoIxmmua9HM7nkrmq1Bte-iLhaNmEQslx7HqrYykFPVRuM3A/formResponse";
+        var TRACKER_URL = "https://script.google.com/macros/s/AKfycbzXlRAMG7PFEy1G_5HLPxnhAQtSI1qkFhMpkyDNFCf7dVH7VDXaZguc1Xb9a0UwXen4/exec";
         var FORM_VIEW_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfoIxmmua9HM7nkrmq1Bte-iLhaNmEQslx7HqrYykFPVRuM3A/viewform";
         var ENTRY = {
           repName: "entry.424161634",
@@ -489,62 +489,44 @@
         var waAppButton = document.getElementById("waAppButton");
         var lastSummary = "";
 
-        // Hidden form + its own dedicated iframe: the ONLY way this page
-        // submits to Google Forms. Both elements are created here and
-        // appended to <body>, so the sink form is a SIBLING of the main
-        // #reportForm — never nested inside it (a form inside a form is
-        // invalid HTML and submits to the wrong action). A plain browser
-        // form post is used because a script fetch() to Google Forms runs
-        // in no-cors mode: its promise resolves even when Google returns an
-        // error page, which previously let this page show "Report saved"
-        // for submissions Google never recorded.
-        var sinkFrame = document.createElement("iframe");
-        sinkFrame.name = "gformSink";
-        sinkFrame.style.display = "none";
-        sinkFrame.setAttribute("aria-hidden", "true");
-        document.body.appendChild(sinkFrame);
-        var sinkForm = document.createElement("form");
-        sinkForm.method = "POST";
-        sinkForm.action = FORM_RESPONSE_URL;
-        sinkForm.target = "gformSink";
-        sinkForm.style.display = "none";
-        sinkForm.setAttribute("aria-hidden", "true");
-        document.body.appendChild(sinkForm);
+        var pendingReport = null;
 
-        // Success is reported ONLY when the sink iframe loads a page served
-        // by Google in response to the formResponse POST. The iframe starts
-        // on about:blank, which the page can read; once Google's response
-        // loads, the iframe document becomes cross-origin and unreadable
-        // (contentDocument === null). A load that leaves the iframe still
-        // readable is not a Google response and does not count. If no
-        // Google response arrives before the timeout, the submission is
-        // treated as failed — never as saved.
-        function submitViaHiddenForm(pairs, onOk, onFail) {
-          var settled = false;
-          var timer = null;
-          function settle(ok) {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimeout(timer);
-            sinkFrame.onload = null;
-            if (ok) onOk(); else onFail();
+        async function requestTracker(url, options) {
+          var controller = new AbortController();
+          var timeout = setTimeout(function () { controller.abort(); }, 20000);
+          try {
+            var response = await fetch(url, Object.assign({
+              signal: controller.signal,
+              credentials: "omit",
+              cache: "no-store"
+            }, options));
+            if (!response.ok) throw new Error("Tracker request failed");
+            return await response.text();
+          } finally {
+            clearTimeout(timeout);
           }
-          sinkForm.innerHTML = "";
-          pairs.forEach(function (pr) {
-            var inp = document.createElement("input");
-            inp.type = "hidden";
-            inp.name = pr[0];
-            inp.value = pr[1];
-            sinkForm.appendChild(inp);
-          });
-          sinkFrame.onload = function () {
-            var fromGoogle = false;
-            try { fromGoogle = !sinkFrame.contentDocument; }
-            catch (e) { fromGoogle = true; }
-            if (fromGoogle) settle(true);
-          };
-          timer = setTimeout(function () { settle(false); }, 15000);
-          sinkForm.submit();
+        }
+
+        async function saveReport(fields) {
+          var signature = fields.toString();
+          if (!pendingReport || pendingReport.signature !== signature) {
+            pendingReport = { id: crypto.randomUUID(), signature: signature };
+          }
+          var reportId = pendingReport.id;
+          fields.set("reportId", reportId);
+          try {
+            await requestTracker(TRACKER_URL, { method: "POST", body: fields });
+          } catch (error) {
+            // A lost response can still mean the sheet write completed.
+          }
+          var statusUrl = new URL(TRACKER_URL);
+          statusUrl.searchParams.set("reportId", reportId);
+          statusUrl.searchParams.set("callback", "kempenfeltStatus");
+          var status = await requestTracker(statusUrl);
+          if (status.trim() !== 'kempenfeltStatus({"saved":true});') {
+            throw new Error("Report save could not be verified");
+          }
+          pendingReport = null;
         }
 
         function val(id) { return document.getElementById(id).value.trim(); }
@@ -580,8 +562,9 @@
           return lines.join("\n");
         }
 
-        form.addEventListener("submit", function (ev) {
+        form.addEventListener("submit", async function (ev) {
           ev.preventDefault();
+          if (submitBtn.disabled) return;
           formError.classList.remove("show");
           formErrorText.textContent = "";
           prefillLink.style.display = "none";
@@ -617,8 +600,7 @@
             visit: radioValue("visit")
           };
 
-          // Build the list of Google Forms fields (entry id -> value). Every
-          // sending method below — and the pre-filled backup link — uses it.
+          // Preserve the pre-filled Google Forms backup.
           var pairs = [];
           function addPair(id, v) { pairs.push([id, v]); }
           addPair(ENTRY.repName, d.repName);
@@ -677,12 +659,26 @@
             formError.scrollIntoView({ behavior: "smooth", block: "center" });
           }
 
-          // Submit through the hidden form only, and show "Report saved"
-          // only when its iframe loads Google's response to the POST (see
-          // submitViaHiddenForm). There is deliberately no fetch() attempt:
-          // a no-cors fetch cannot be confirmed and previously produced
-          // false success screens.
-          submitViaHiddenForm(pairs, showSuccess, showError);
+          try {
+            await saveReport(new URLSearchParams({
+              repName: d.repName,
+              custName: d.custName,
+              custPhone: d.custPhone,
+              custEmail: d.custEmail,
+              orderNo: d.orderNo,
+              product: d.products.join(", "),
+              location: d.location,
+              category: d.categories.join(", "),
+              details: d.details,
+              photos: d.photos ? "Yes — photos emailed to the service team" : "",
+              siteNotes: d.siteNotes,
+              promised: d.promised,
+              visit: d.visit
+            }));
+            showSuccess();
+          } catch (error) {
+            showError();
+          }
         });
 
         document.getElementById("copyBtn").addEventListener("click", function () {
